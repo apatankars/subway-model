@@ -13,6 +13,14 @@ from test import test
 import time
 
 if __name__ == "__main__":
+
+    physical_devices = tf.config.list_physical_devices('GPU')
+    if len(physical_devices) > 0:
+        tf.config.experimental.set_memory_growth(physical_devices[0], True)
+        print("GPU is available and configured")
+    else:
+        print("No GPU found, using CPU")
+
     start_proc = time.time()
     spatial_data = pd.read_parquet("data/final_data/spatial_data.parquet")
     external_2023 = pd.read_parquet("data/final_data/external_2023.parquet")
@@ -37,7 +45,7 @@ if __name__ == "__main__":
     print(f'starting to train')
     training_start = time.time()
     model.compile(
-        optimizer=tf.keras.optimizers.legacy.Adam(learning_rate=0.001),
+        optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
         loss=tf.keras.losses.MeanAbsoluteError())
     train(model=model, epochs=epochs, batch_size=batch_size, data=(spatial_data, temporal_2023, external_2023, adjacency_matrix))
     model.save('model/dstgcn_full_model')
