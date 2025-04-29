@@ -12,6 +12,18 @@ from preprocessing.build_adjacency_matrix import build_adjacency_matrix
 from test import test
 import time
 
+# Configure GPU
+gpus = tf.config.list_physical_devices('GPU')
+if gpus:
+    try:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        print(f"Found {len(gpus)} GPU(s). Memory growth enabled.")
+    except RuntimeError as e:
+        print(f"GPU configuration error: {e}")
+else:
+    print("No GPU found. Running on CPU.")
+
 if __name__ == "__main__":
     start_proc = time.time()
     spatial_data = pd.read_parquet("data/final_data/spatial_data.parquet")
@@ -24,11 +36,21 @@ if __name__ == "__main__":
     ridership_2023, weather_2023 = split_external(external_2023)
     ridership_2024, weather_2024 = split_external(external_2024)
     model_load = time.time()
-    model = DSTGCN((len(spatial_data.columns),
-                    len(temporal_2023.columns),
-                    len(ridership_2023.columns), 
-                    len(weather_2023.columns),
-                    len(spatial_data)))
+
+    strategy = tf.distribute.MirroredStrategy()
+    print(f"Number of devices: {strategy.num_replicas_in_sync}")
+
+    with strategy.scope():
+        model = DSTGCN((len(spatial_data.columns),
+                        len(temporal_2023.columns),
+                        len(ridership_2023.columns), 
+                        len(weather_2023.columns),
+                        len(spatial_data)))
+        
+        model.compile(
+            optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+            loss=tf.keras.losses.MeanAbsoluteError())
+        
     print(f'instantiated model in {time.time() - model_load:4f}s')
     
     adjacency_matrix = build_adjacency_matrix(graph)
@@ -38,9 +60,6 @@ if __name__ == "__main__":
     
     print(f'starting to train')
     training_start = time.time()
-    model.compile(
-        optimizer=tf.keras.optimizers.legacy.Adam(learning_rate=0.001),
-        loss=tf.keras.losses.MeanAbsoluteError())
     train(model=model, 
           epochs=epochs, 
           batch_size=batch_size, 

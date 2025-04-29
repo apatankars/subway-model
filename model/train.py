@@ -30,6 +30,78 @@ def split_external(external_features: pd.DataFrame):
     
     return ridership_features, weather_features
 
+def create_dataset(windows, batch_size):
+    """
+    Converts a list of window data into an optimized TensorFlow Dataset.
+    
+    Args:
+        windows: List of tuples (timestamp, temporal_context, weather_context, ridership_vector, y_true)
+        batch_size: Size of batches to create
+        
+    Returns:
+        A TensorFlow Dataset object optimized for GPU training
+    """
+    def generator():
+        for window in windows:
+            yield window
+    
+    # Define the output signature based on your data structure
+    output_signature = (
+        tf.TensorSpec(shape=(), dtype=tf.string),                # timestamp
+        tf.TensorSpec(shape=(None, 24, 2), dtype=tf.float32),    # temporal_context [N,24,2]
+        tf.TensorSpec(shape=(24, None), dtype=tf.float32),       # weather_context [24,F_ext]
+        tf.TensorSpec(shape=(None,), dtype=tf.float32),          # ridership_vector
+        tf.TensorSpec(shape=(None,), dtype=tf.float32)           # y_true [N]
+    )
+    
+    # Create the dataset from the generator
+    dataset = tf.data.Dataset.from_generator(
+        generator,
+        output_signature=output_signature
+    )
+    
+    # Optimize the dataset for performance
+    dataset = dataset.batch(batch_size)
+    dataset = dataset.prefetch(tf.data.AUTOTUNE)  # Prefetch next batch while GPU is processing
+    
+    return dataset
+
+@tf.function
+def train_step(model, spatial_features, temporal_context, ridership_vector, weather_context, A, y_true):
+    """
+    Single optimization step compiled with tf.function for GPU acceleration.
+    
+    Args:
+        model: The DSTGCN model
+        spatial_features: Static spatial features for nodes
+        temporal_context: Temporal features time series
+        ridership_vector: External ridership features
+        weather_context: Weather time series
+        A: Adjacency matrix
+        y_true: Ground truth values
+        
+    Returns:
+        loss: The computed loss value
+    """
+    with tf.GradientTape() as tape:
+        # Forward pass
+        y_pred = model((
+            spatial_features, 
+            temporal_context, 
+            ridership_vector, 
+            weather_context, 
+            A
+        ), training=True)
+        
+        # Calculate loss
+        loss = model.loss(y_true, y_pred)
+    
+    # Calculate gradients and apply updates
+    grads = tape.gradient(loss, model.trainable_variables)
+    model.optimizer.apply_gradients(zip(grads, model.trainable_variables))
+    
+    return loss
+
 with open("data/subway_network.pkl", "rb") as f:
     graph = pickle.load(f)
 
@@ -93,47 +165,76 @@ def make_windows(timestamps):
         ))
     return windows
 
-
 def train(model, epochs, batch_size, data):
-    # spatial_features, temporal_features, external_features, weather_features, A = model_inputs
+    """
+    Train the DSTGCN model using GPU-optimized data pipeline.
     
+    Args:
+        model: The DSTGCN model instance
+        epochs: Number of training epochs
+        batch_size: Batch size for training
+        data: Tuple of (spatial_features, temporal_features, ridership_features, weather_features, A)
+    """
+    # Unpack data components
     spatial_features, temporal_features, ridership_features, weather_features, A = data
+    
+    # Convert spatial features to tensor once
     spatial_features = tf.convert_to_tensor(spatial_features, dtype=tf.float32)
     
+    # Filter timestamps
     timestamps = weather_features.index
     timestamps = timestamps[(timestamps.month > 1) | (timestamps.day > 1)]
-    # print("\nmaking window")
+    
+    # Create windows once
+    print("Creating data windows...")
     windows = make_windows(timestamps)
     
+    # Training loop
     for epoch in range(epochs):
-        # shuffle timestamps each epoch
+        # Shuffle windows each epoch
         random.shuffle(windows)
-        epoch_loss = 0
+        
+        # Create a fresh dataset with the shuffled windows
+        print(f"Creating optimized dataset for epoch {epoch+1}...")
+        dataset = create_dataset(windows, batch_size)
+        
+        epoch_loss = 0.0
         batch_count = 0
-        # "batching"
-        for i in tqdm(range(0, len(windows), batch_size), desc=f"Epoch {epoch+1}/{epochs}"):
-            batch = windows[i:i + batch_size]
-
-            with tf.GradientTape() as tape:
-                total_loss = 0.0
-                for (ts, temporal_context, weather_context, ridership_vector, y_true) in batch:
-                    
-                    weather_context = tf.expand_dims(weather_context, axis=0)
-                    y_true = tf.expand_dims(y_true, axis=-1)
-                    
-                    # forward pass on one window
-                    y_pred = model((spatial_features, temporal_context, ridership_vector, weather_context, A), training=True)  # [N,1]
-                    total_loss += model.loss(y_true, y_pred)
-
-                # average the loss over the K windows
-                total_loss /= tf.cast(len(batch), tf.float32)
+        
+        # Train on batches using the dataset
+        for batch_data in tqdm(dataset, desc=f"Epoch {epoch+1}/{epochs}"):
+            ts_batch, temporal_context_batch, weather_context_batch, ridership_batch, y_true_batch = batch_data
+            
+            batch_size_actual = tf.shape(ts_batch)[0]
+            batch_loss = 0.0
+            
+            # Process each item in the batch
+            for i in range(batch_size_actual):
+                # Extract individual sample from batch
+                temporal_context = temporal_context_batch[i]
+                weather_context = tf.expand_dims(weather_context_batch[i], axis=0)
+                ridership_vector = ridership_batch[i]
+                y_true = tf.expand_dims(y_true_batch[i], axis=-1)
+                
+                # Use the optimized training step function
+                loss = train_step(
+                    model,
+                    spatial_features,
+                    temporal_context,
+                    ridership_vector,
+                    weather_context,
+                    A,
+                    y_true
+                )
+                
+                batch_loss += loss
+            
+            # Average loss for this batch
+            batch_loss /= tf.cast(batch_size_actual, tf.float32)
             
             batch_count += 1
-            epoch_loss += total_loss
-            # backprop once
-            grads = tape.gradient(total_loss, model.trainable_variables)
-            model.optimizer.apply_gradients(zip(grads, model.trainable_variables))
-        average_epoch_loss = epoch_loss / batch_count
+            epoch_loss += batch_loss
+        
+        # Report average loss for the epoch
+        average_epoch_loss = epoch_loss / tf.cast(batch_count, tf.float32)
         print(f"Average loss for epoch {epoch+1}: {average_epoch_loss}")
-    
-    
