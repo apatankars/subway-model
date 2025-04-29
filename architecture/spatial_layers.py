@@ -38,8 +38,8 @@ class GCN(keras.Model):
             # GCNConv input order is [X, A]
             if isinstance(layer, GCNConv):
                 # Change this line - pass a list of None values instead of just None
-                mask_x = tf.ones_like(x[:, 0], dtype=tf.bool)
-                mask_a = tf.ones_like(a[:, 0], dtype=tf.bool)
+                mask_x = tf.ones_like(x[:, 0], dtype=tf.float32)
+                mask_a = tf.ones_like(a[:, 0], dtype=tf.float32)
                 x = layer([x, a], mask=[mask_x, mask_a])
             else:
                 x = layer(x)
