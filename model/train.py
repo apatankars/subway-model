@@ -10,6 +10,24 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from preprocessing.training_prep import get_turnstile_context, get_external_context
 from numpy.lib.stride_tricks import sliding_window_view
 
+def create_checkpoint_callback(model, checkpoint_dir="checkpoints", save_freq=5):
+    """Create a checkpoint callback to save model weights during training"""
+    import os
+    import tensorflow as tf
+    
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    # Checkpoint callback to save weights every few batches
+    checkpoint_path = os.path.join(checkpoint_dir, "weights.{epoch:02d}")
+    cp_callback = tf.keras.callbacks.ModelCheckpoint(
+        filepath=checkpoint_path,
+        save_weights_only=True,
+        save_freq=save_freq,
+        verbose=1
+    )
+    
+    return cp_callback
+
 def split_external(external_features: pd.DataFrame):
     external_features = external_features.set_index('datetime').copy()
     
@@ -129,7 +147,7 @@ def make_windows(timestamps):
     return windows
 
 
-def train(model, epochs, batch_size, data):
+def train(model, epochs, batch_size, data, use_checkpoints=True):
     # spatial_features, temporal_features, external_features, weather_features, A = model_inputs
     
     spatial_features, temporal_features, external_features, A = data
@@ -138,34 +156,110 @@ def train(model, epochs, batch_size, data):
     
     timestamps = weather_features.index
     timestamps = timestamps[(timestamps.month > 1) | (timestamps.day > 1)]
-    # print("\nmaking window")
     windows = make_windows(timestamps)
     
-    for epoch in range(epochs):
-        # shuffle timestamps each epoch
-        random.shuffle(windows)
+    # Create dataset for batching
+    def create_training_dataset(windows, batch_size):
+        def generator():
+            for window in windows:
+                ts, temporal_context, weather_context, ridership_vector, y_true = window
+                weather_context = tf.expand_dims(weather_context, axis=0) 
+                y_true = tf.expand_dims(y_true, axis=-1)
+                yield (spatial_features, temporal_context, ridership_vector, weather_context, A), y_true
+                
+        # Create tf.data.Dataset
+        output_signature = (
+            (
+                tf.TensorSpec(shape=spatial_features.shape, dtype=tf.float32),
+                tf.TensorSpec(shape=None, dtype=tf.float32),
+                tf.TensorSpec(shape=None, dtype=tf.float32),
+                tf.TensorSpec(shape=None, dtype=tf.float32),
+                tf.TensorSpec(shape=A.shape, dtype=tf.float32),
+            ),
+            tf.TensorSpec(shape=None, dtype=tf.float32)
+        )
+        
+        return tf.data.Dataset.from_generator(
+            generator,
+            output_signature=output_signature
+        ).batch(batch_size).prefetch(tf.data.AUTOTUNE)
+
+    # Try to use Keras fit method with dataset for checkpointing
+    try:
+        print("Attempting to use Keras fit method with checkpointing...")
+        train_ds = create_training_dataset(windows, batch_size)
+        
+        callbacks = []
+        if use_checkpoints:
+            checkpoint_callback = create_checkpoint_callback(model)
+            callbacks.append(checkpoint_callback)
             
-        # "batching"
-        for i in tqdm(range(0, len(windows), batch_size), desc=f"Epoch {epoch+1}/{epochs}"):
-            batch = windows[i:i + batch_size]
+        # Use standard Keras training
+        history = model.fit(
+            train_ds,
+            epochs=epochs,
+            callbacks=callbacks,
+            verbose=1
+        )
+        
+        # Create backup save point after training
+        try:
+            print("Saving backup weights after training")
+            backup_path = "model/backup_weights"
+            model.save_weights(backup_path)
+            print(f"Backup weights saved to {backup_path}")
+        except Exception as e:
+            print(f"Error saving backup weights: {e}")
+        
+        return history
+        
+    except Exception as e:
+        print(f"Error using Keras fit method: {e}")
+        print("Falling back to custom training loop...")
+        
+        # Original training code as fallback
+        for epoch in range(epochs):
+            # shuffle timestamps each epoch
+            random.shuffle(windows)
+                
+            # "batching"
+            for i in tqdm(range(0, len(windows), batch_size), desc=f"Epoch {epoch+1}/{epochs}"):
+                batch = windows[i:i + batch_size]
+                
+                # Save weights periodically during training
+                if use_checkpoints and i % (len(windows) // 4) == 0:
+                    try:
+                        checkpoint_path = f"checkpoints/manual_epoch_{epoch+1}_batch_{i}"
+                        os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
+                        model.save_weights(checkpoint_path)
+                        print(f"Manual checkpoint saved: {checkpoint_path}")
+                    except Exception as e:
+                        print(f"Error saving manual checkpoint: {e}")
 
-            with tf.GradientTape() as tape:
-                total_loss = 0.0
-                for (ts, temporal_context, weather_context, ridership_vector, y_true) in batch:
-                    
-                    weather_context = tf.expand_dims(weather_context, axis=0)
-                    y_true = tf.expand_dims(y_true, axis=-1)
-                    
-                    # forward pass on one window
-                    y_pred = model((spatial_features, temporal_context, ridership_vector, weather_context, A), training=True)  # [N,1]
-                    total_loss += model.loss(y_true, y_pred)
+                with tf.GradientTape() as tape:
+                    total_loss = 0.0
+                    for (ts, temporal_context, weather_context, ridership_vector, y_true) in batch:
+                        
+                        weather_context = tf.expand_dims(weather_context, axis=0)
+                        y_true = tf.expand_dims(y_true, axis=-1)
+                        
+                        # forward pass on one window
+                        y_pred = model((spatial_features, temporal_context, ridership_vector, weather_context, A), training=True)  # [N,1]
+                        total_loss += model.loss(y_true, y_pred)
 
-                # average the loss over the K windows
-                total_loss /= tf.cast(len(batch), tf.float32)
+                    # average the loss over the K windows
+                    total_loss /= tf.cast(len(batch), tf.float32)
 
-            # backprop once
-            grads = tape.gradient(total_loss, model.trainable_variables)
-            model.optimizer.apply_gradients(zip(grads, model.trainable_variables))
-            print(f"average loss for epoch {epoch+1}: {total_loss}")
-    
-    
+                # backprop once
+                grads = tape.gradient(total_loss, model.trainable_variables)
+                model.optimizer.apply_gradients(zip(grads, model.trainable_variables))
+                print(f"average loss for epoch {epoch+1}: {total_loss}")
+        
+        # Create backup save point after training
+        try:
+            print("Saving backup weights after training")
+            backup_path = "model/backup_weights"
+            model.save_weights(backup_path)
+            print(f"Backup weights saved to {backup_path}")
+        except Exception as e:
+            print(f"Error saving backup weights: {e}")
