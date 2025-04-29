@@ -1,7 +1,5 @@
 import pandas as pd
-import networkx as nx
 import pickle
-import torch
 
 def get_spatial_data():
     with open("data/subway_network.pkl", "rb") as f:

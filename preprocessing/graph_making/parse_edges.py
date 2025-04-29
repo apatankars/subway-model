@@ -1,8 +1,5 @@
-import random
 import pandas as pd
-import networkx as nx
-import pickle
-from collections import Counter, defaultdict
+from collections import defaultdict
 
 def load_gtfs_data(stops_path, routes_path, trips_path, stop_times_path):
     """

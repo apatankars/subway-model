@@ -1,5 +1,3 @@
-import pandas as pd
-import networkx as nx
 import numpy as np
 
 def build_adjacency_matrix(graph):

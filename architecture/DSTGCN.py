@@ -1,110 +1,94 @@
-import tensorflow as tf
-import pandas as pd
+import random
 import numpy as np
-from tqdm import tqdm
-import sys
-import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from train import split_external, make_windows, create_dataset
+import tensorflow as tf
+import keras
+from architecture.spatial_layers import stackedSpatialGCNs, GCN
+from architecture.temporal_layers import StackedSTBlocks, STBlock
 
-@tf.function
-def evaluate_step(model, spatial_features, temporal_context, ridership_vector, weather_context, A, y_true):
-    """
-    Single evaluation step compiled with tf.function for GPU acceleration.
-    
-    Args:
-        model: The DSTGCN model
-        spatial_features: Static spatial features for nodes
-        temporal_context: Temporal features time series
-        ridership_vector: External ridership features
-        weather_context: Weather time series
-        A: Adjacency matrix
-        y_true: Ground truth values
-        
-    Returns:
-        loss: The computed loss value
-    """
-    # Forward pass
-    y_pred = model((
-        spatial_features, 
-        temporal_context, 
-        ridership_vector, 
-        weather_context, 
-        A
-    ), training=False)
-    
-    # Calculate loss
-    loss = model.loss(y_true, y_pred)
-    
-    return loss
+@keras.saving.register_keras_serializable(package="DSTGCN")
+class DSTGCN(keras.Model):
 
-def test(model, batch_size, data):
-    """
-    Test the DSTGCN model using GPU-optimized data pipeline.
-    
-    Args:
-        model: The DSTGCN model instance
-        batch_size: Batch size for evaluation
-        data: Tuple of (spatial_features, temporal_features, ridership_features, weather_features, A)
+    def __init__(self, feature_sizes, **kwargs):
+        super().__init__(**kwargs)
+        '''
+        out_features should be num_nodes
+        '''
+
+        spatial_features, st_features, external_features, weather_features, out_features = feature_sizes
+
+        # spatial embedding layer to embed spatial features from nodes
+        self.spatial_embedding = keras.Sequential([
+            keras.layers.Dense(20, activation="relu"),
+            keras.layers.Dense(15, activation="relu"),
+        ])
+
+
+        # stacked spatial GCN blocks
+        self.spatial_gcn = stackedSpatialGCNs(GCN([15, 15, 15], 15),
+                                           GCN([15, 15, 15], 15),
+                                           GCN([14, 13, 12, 11], 10))
         
-    Returns:
-        average_batch_loss: Average loss across all test batches
-    """
-    # Unpack data components
-    spatial_features, temporal_features, ridership_features, weather_features, A = data
+        # embedding temporal features
+        self.temporal_blocks = StackedSTBlocks(STBlock(st_features, 4), STBlock(5, 5), STBlock(10, 10))
+        # average pooling of temporal 
+        self.temporal_agg = keras.layers.AveragePooling1D(pool_size=24)
+
+        embedding_sizes = [(external_features * (4 - i) + 10 * i) // 4 for i in (1, 4)]
+        external_embedding_layers = [
+            keras.layers.Dense(embedding_sizes[0]),
+            keras.layers.Dense(embedding_sizes[1]),
+            keras.layers.Dense(10),
+        ]
+        self.external_embedding = keras.Sequential(external_embedding_layers)
+
+        # weather time series encoder using GRU with dropout
+        self.weather_gru = keras.layers.GRU(
+            units=weather_features,
+            return_sequences=False,
+            dropout=0.2,
+            recurrent_dropout=0.2,
+        )
+
+        # classifier head
+        head = [
+            keras.layers.ReLU(),
+            keras.layers.Dense(out_features),
+        ]
+        self.classifier = keras.Sequential(head)
+
     
-    # Convert spatial features to tensor once
-    spatial_features = tf.convert_to_tensor(spatial_features, dtype=tf.float32)
-    
-    # Filter timestamps
-    timestamps = weather_features.index
-    timestamps = timestamps[(timestamps.month > 1) | (timestamps.day > 1)]
-    
-    # Create windows for testing
-    print("Creating test data windows...")
-    windows = make_windows(timestamps)
-    
-    # Create an optimized dataset for testing
-    print("Creating optimized test dataset...")
-    dataset = create_dataset(windows, batch_size)
-    
-    # Track test loss
-    batch_losses = []
-    
-    # Evaluate on batches
-    for batch_data in tqdm(dataset, desc="Testing"):
-        ts_batch, temporal_context_batch, weather_context_batch, ridership_batch, y_true_batch = batch_data
-        
-        batch_size_actual = tf.shape(ts_batch)[0]
-        batch_loss = 0.0
-        
-        # Process each item in the batch
-        for i in range(batch_size_actual):
-            # Extract individual sample from batch
-            temporal_context = temporal_context_batch[i]
-            weather_context = tf.expand_dims(weather_context_batch[i], axis=0)
-            ridership_vector = ridership_batch[i]
-            y_true = tf.expand_dims(y_true_batch[i], axis=-1)
-            
-            # Use the optimized evaluation step function
-            loss = evaluate_step(
-                model,
-                spatial_features,
-                temporal_context,
-                ridership_vector,
-                weather_context,
-                A,
-                y_true
-            )
-            
-            batch_loss += loss
-        
-        # Average loss for this batch
-        batch_loss /= tf.cast(batch_size_actual, tf.float32)
-        batch_losses.append(batch_loss)
-    
-    # Calculate overall average loss
-    average_batch_loss = tf.reduce_mean(batch_losses)
-    print(f"Test loss: {average_batch_loss.numpy()}")
-    
-    return average_batch_loss
+    def call(self, inputs, training=False):
+        '''
+        inputs = tuple of five feature tensors
+        spatial_features   shape=[num_nodes, spatial_dim] = node static spatial features
+        temporal_features  shape=[num_nodes, temporal_dim, T] = node time series for the given time window
+        external_features  shape=[1, F3] = per-graph external features
+        weather_features   shape=[1,T,weather_dim] = weather series for the given time window
+        A                  shape=[N, N] = adjacency of the B graphs
+        '''
+        spatial_features, temporal_features, external_features, weather_features, A = inputs
+        N = tf.shape(A)[0]
+
+        # spatial branch: [N, spatial_dim] --> [N, dim_GCN_output]
+        embedded_spatial_features = self.spatial_embedding(spatial_features)  # [N,15]
+        spatial_out = self.spatial_gcn((embedded_spatial_features, A), training=training) # [N,10]
+
+        # temporal branch: [N, temporal_dim, T] --> [N, dim_stgcn_output, T]
+        embedded_temporal_features = self.temporal_blocks((temporal_features, A), training=training) # [N,10,T]
+        etf = tf.transpose(embedded_temporal_features, [0, 2, 1]) # [N,T,10]
+        pooled_etf = self.temporal_agg(etf) # [N,1,10]
+        etf_out = tf.squeeze(pooled_etf, axis=1) # [N,10]     
+
+        # external static features
+        external_static_embedding = self.external_embedding(external_features, training=training) # [1, external_dim]
+        ese_full = tf.tile(external_static_embedding, [N, 1]) # [N, external_dim]
+
+        # GRUUUUUU weather encoding
+        weather_embedding = self.weather_gru(weather_features, training=training) # [1, weather_dim]
+        weather_full = tf.tile(weather_embedding, [N, 1]) # [N, weather_dim]
+
+        # concatenate node features
+        full_features = tf.concat([spatial_out, etf_out, ese_full, weather_full], axis=-1) # [N, spatial_dim+temporal_dim+external_dim+weather_dim]
+
+        # node level prediction
+        return self.classifier(full_features, training=training) # [N, 1]

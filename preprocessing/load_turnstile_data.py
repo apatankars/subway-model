@@ -1,5 +1,4 @@
 import pandas as pd
-import csv
 
 # Read the CSV
 year = 2024
