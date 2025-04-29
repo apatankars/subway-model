@@ -30,16 +30,15 @@ class GCN(keras.Model):
         # TODO DOES TF TRACK LAYERS_LIST WEIGHTS
 
     def call(self, inputs: tuple):
-        '''
-        inputs: tuple(x, a) where x=node features, a=adjacency
-        '''
         x, a = inputs    
         for layer in self.layers_list:
-            # GCNConv input order is [X, A]
             if isinstance(layer, GCNConv):
-                # Change this line - pass a list of None values instead of just None
+                # Create masks that are broadcastable to the output shape
                 mask_x = tf.ones_like(x[:, 0], dtype=tf.float32)
+                mask_x = tf.reshape(mask_x, (-1, 1))  # Reshape to [426, 1] for broadcasting
+                
                 mask_a = tf.ones_like(a[:, 0], dtype=tf.float32)
+                
                 x = layer([x, a], mask=[mask_x, mask_a])
             else:
                 x = layer(x)
