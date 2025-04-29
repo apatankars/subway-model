@@ -12,6 +12,17 @@ from preprocessing.build_adjacency_matrix import build_adjacency_matrix
 from test import test
 import time
 
+gpus = tf.config.list_physical_devices('GPU')
+if gpus:
+    try:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        print(f"Found {len(gpus)} GPU(s). Memory growth enabled.")
+    except RuntimeError as e:
+        print(f"GPU configuration error: {e}")
+else:
+    print("No GPU found. Running on CPU.")
+
 if __name__ == "__main__":
     start_proc = time.time()
     spatial_data = pd.read_parquet("data/final_data/spatial_data.parquet")
@@ -32,8 +43,8 @@ if __name__ == "__main__":
     print(f'instantiated model in {time.time() - model_load:4f}s')
     
     adjacency_matrix = build_adjacency_matrix(graph)
-    epochs = 3
-    batch_size = 20
+    epochs = 10
+    batch_size = 64
     
     
     print(f'starting to train')
