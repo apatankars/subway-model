@@ -5,8 +5,7 @@ from tqdm import tqdm
 def test(model, batch_size, data):
     # spatial_features, temporal_features, external_features, weather_features, A = model_inputs
     
-    spatial_features, temporal_features, external_features, A = data
-    ridership_features, weather_features = split_external(external_features)
+    spatial_features, temporal_features, ridership_features, weather_features, A = data
     spatial_features = tf.convert_to_tensor(spatial_features, dtype=tf.float32)
     
     timestamps = weather_features.index
