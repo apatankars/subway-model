@@ -92,22 +92,3 @@ class DSTGCN(keras.Model):
 
         # node level prediction
         return self.classifier(full_features, training=training) # [N, 1]
-    
-    def get_config(self):
-        """Return configuration for serialization"""
-        config = super().get_config()
-        config.update({
-            "feature_sizes": (
-                self.spatial_embedding.layers[0].units,
-                self.spatial_gcn.blocks[0].layers_list[0].channels,
-                self.external_embedding.layers[0].units,
-                self.weather_gru.units,
-                self.classifier.layers[-1].units
-            )
-        })
-        return config
-    
-    @classmethod
-    def from_config(cls, config):
-        """Create model from configuration"""
-        return cls(**config)

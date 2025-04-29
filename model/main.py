@@ -201,8 +201,7 @@ if __name__ == "__main__":
     
     # Train with checkpointing
     train(model=model, epochs=epochs, batch_size=batch_size, 
-          data=(spatial_data, temporal_2023, external_2023, adjacency_matrix),
-          use_checkpoints=True)
+          data=(spatial_data, temporal_2023, external_2023, adjacency_matrix))
     
     # Save model with multiple fallbacks
     save_dir = save_model_with_fallbacks(model)
