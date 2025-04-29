@@ -29,16 +29,19 @@ class STBlock(keras.Model):
                 temporal_features: tensor shaped [n_nodes, input_features, time_steps]
         :return: tensor shaped [n_nodes, output_features, time_steps]
         '''
-        temporal_features,adjacency,  = inputs
+        temporal_features, adjacency = inputs
         # swap shape to be [n_nodes, time_steps, input_features]
         x = tf.transpose(temporal_features, perm=[0, 2, 1])
-        # aply GCN per time slice
-        time_steps = tf.shape(x)[1]
+        
+        # SOLUTION: Hardcode the number of time steps since your sliding window is fixed at 24
+        time_steps = 24  # Based on your sliding window size in train.py
+        
         spatial_outputs = []
         for t in range(time_steps):
             feat_t = x[:, t, :] # [n_nodes, input_features]
             out_t = self.spatial_embedding((feat_t, adjacency), training=training)
             spatial_outputs.append(out_t)  # each out_t is [n_nodes, output_features]
+        
         # stack into [n_nodes, time_steps, output_features]
         x_spatial = tf.stack(spatial_outputs, axis=1)
         # temp conv, with input [batch=n_nodes, length=time_steps, channels=output_features]
