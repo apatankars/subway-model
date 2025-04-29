@@ -192,7 +192,7 @@ if __name__ == "__main__":
     print(f'starting to train')
     training_start = time.time()
     model.compile(
-        optimizer=tf.keras.optimizers.legacy.Adam(learning_rate=0.001),
+        optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
         loss=tf.keras.losses.MeanAbsoluteError())
     
     # Create directories for saved models and checkpoints
