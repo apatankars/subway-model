@@ -17,13 +17,13 @@ class GCN(keras.Model):
         # stack hidden GCN layers
         for h in hidden_sizes:
             self.layers_list += [
-                GCNConv(h, activation=None, mask=None),
+                GCNConv(h, activation=None),
                 BatchNormalization(),
                 ReLU(),
             ]
         # final output gcn 
         self.layers_list += [
-            GCNConv(out_feats, activation=None, mask=None),
+            GCNConv(out_feats, activation=None),
             BatchNormalization(),
             ReLU(),
         ]
@@ -37,7 +37,8 @@ class GCN(keras.Model):
         for layer in self.layers_list:
             # GCNConv input order is [X, A]
             if isinstance(layer, GCNConv):
-                x = layer([x, a], mask=None)
+                # Change this line - pass a list of None values instead of just None
+                x = layer([x, a], mask=[None, None])
             else:
                 x = layer(x)
         return x
